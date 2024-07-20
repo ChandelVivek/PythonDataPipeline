@@ -4,3 +4,5 @@ Python codes for data pipelines explain the data pipeline created with nelow par
 Source- Any API data source
 Destination - Snowflake database stage
 
+Architecture diagram - Draw.io
+
