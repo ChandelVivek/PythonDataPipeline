@@ -1,0 +1,200 @@
+from pyspark.sql.functions import lit, col, explode_outer, array, concat_ws, struct
+
+# Fields to transform
+fields_to_transform = [
+    "customfield_12464", "customfield_12467", "customfield_12510",
+    "customfield_12478", "customfield_12326", "customfield_12514",
+    "customfield_13979", "customfield_13980",
+]
+transformed_df = flattened_df
+
+# Ensure all fields are strings by converting arrays or structs to strings
+transformed_columns = [
+    concat_ws(",", col(field)).alias(field) if "array" in str(flattened_df.schema[field].dataType).lower() else col(field)
+    for field in fields_to_transform
+]
+
+transformed_df = transformed_df.withColumn(
+    "field_names", array(*[lit(field) for field in fields_to_transform])
+).withColumn(
+    "field_values", array(*[col(field) for field in fields_to_transform])
+)
+
+# Explode both arrays into rows
+exploded_df = transformed_df.withColumn("field_name", explode_outer(col("field_names"))) \
+    .withColumn("field_value", explode_outer(col("field_values"))) \
+    .select("id", "field_name", "field_value", "Time", "LoadDate")
+
+# Show the transformed DataFrame
+exploded_df.show(truncate=False)
+
+
+
+################################
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+  
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+import sys
+import json
+import time
+import random
+import requests
+from requests.auth import HTTPBasicAuth
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    StructType, StructField, StringType, IntegerType, BooleanType
+)
+from pyspark.sql.functions import current_timestamp, col, when, array, lit, expr
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.dynamicframe import DynamicFrame
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType,BooleanType
+from pyspark.sql.functions import current_timestamp
+#snowflake_issue.show()
+def jira_url(url_string):
+    url = url_string
+    auth = HTTPBasicAuth("email.com", "auth_id")
+
+    headers = {
+      "Accept": "application/json"
+    }
+
+    query = {
+      'accountId': 'account_id'
+    }
+
+    response = requests.request(
+       "GET",
+       url,
+       headers = headers,
+       auth = auth
+    )
+    if response and response.status_code == 200:
+        try:
+            return response.text  # Parse JSON if it's valid
+        except json.JSONDecodeError:
+            print("Invalid JSON response received.")
+            return None  # Handle invalid JSON gracefully
+    else:
+        print("Empty response or request failed.")
+        return None  # Handle empty responses or failed requests
+
+    #return response.json()
+   # return response.text
+# Function to fetch JIRA data for a specific issue
+def fetch_data(issue):
+    issue_id = issue
+    results = []
+    url_string = f"https://saviyntars.atlassian.net/rest/api/3/issue/{issue_id}?expand=changelog&fields=changelog"
+    
+    d_json = jira_url(url_string)
+    if d_json:
+         # Check if the dictionary is not empty
+        try:
+            sleep_time = random.uniform(0.1, 0.2)
+            time.sleep(sleep_time)
+            data = json.loads(d_json)
+            id = data.get("id")
+            changelog = data.get("changelog", {}).get("histories", [])
+            
+            # Extract relevant fields from the changelog
+            results = [
+                {
+                    "issue_id": id,
+                    "fieldId": field.get("fieldId", "NA"),
+                    "value_to": field.get("to", "NA"),                    
+                    "toString": field.get("toString" , "NA"),
+                    "accountId": entry.get("author", {}).get("accountId", "NA"),
+                    "IS_ACTIVE" : entry.get("author", {}).get("active", "NA"),
+                    "Time": entry.get("created", "NA")
+                }
+                for entry in changelog
+                for field in entry.get("items", [])
+            ]
+        
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"Error processing issue {issue_id}: {e}")
+    else:
+        print(f"Empty response received for issue {issue_id}")
+        return {"error": "No data returned"}       
+    
+    return results
+# Fetch list of issues from JIRA
+json_data_issues_list=[]
+url_string = f"https://saviyntars.atlassian.net/rest/api/2/search?fields=key&jql=updated%20%3E=%20-1d&startAt=0&maxResults=10000"
+d_json = jira_url(url_string)
+d_json = json.loads(d_json)
+#print(d_json["total"])
+
+total_results = d_json["total"] 
+max_results = 10000
+start_at = 0         
+print(total_results)
+while start_at < total_results:
+    print(start_at)
+    url_string = f"https://saviyntars.atlassian.net/rest/api/2/search?fields=key&jql=updated%20%3E=%20-1d&startAt={start_at}&maxResults=10000"
+    response_data = jira_url(url_string) 
+    parse_json = json.loads(response_data)
+    json_data_issues_list.append(parse_json)
+    print(f"Processing records starting at {start_at}")    
+    start_at += max_results
+print("All records processed.")
+# Process issues into RDD
+issues_rdd = sc.parallelize(json_data_issues_list)
+processed_issues_rdd = issues_rdd.flatMap(lambda issue_list: issue_list.get("issues", [])) \
+    .map(lambda issue: {"issue_id": issue.get("id", "N/A")})
+issue_list = processed_issues_rdd.collect()
+# Schema for output
+schema = StructType([
+    StructField("issue_id", StringType(), True),
+    StructField("fieldId", StringType(), True),
+    StructField("value_to", StringType(), True),
+    StructField("toString", StringType(), True),
+    StructField("accountId", StringType(), True),
+    StructField("IS_ACTIVE", StringType(), True),
+    StructField("Time", StringType(), True),
+])
+output_path = "s3://jira-2024/user_spark_table/snowflake_jira/Staging/issue_field_history.parquet"
+issuesed_rdd = processed_issues_rdd.flatMap(lambda issue: fetch_data(issue['issue_id']))
+output_list = issuesed_rdd.collect()
+
+new_output_list=[]
+for i in output_list:
+    if("issue_id" in i and "fieldId" in i and "value_to" in i and "toString" in i and "accountId" in i and "Time" in i and "IS_ACTIVE" in i):
+        new_output_list.append(i)
+schema = StructType([
+    StructField("issue_id", StringType(), True),
+    StructField("fieldId", StringType(), True),
+    StructField("value_to", StringType(), True),
+    StructField("toString", StringType(), True),
+    StructField("accountId", StringType(), True),
+    StructField("IS_ACTIVE",  StringType(), True),
+    StructField("Time", StringType(), True)
+    
+])
+df = spark.createDataFrame(new_output_list, schema=schema)
+df = df.withColumn("LoadDate", current_timestamp())
+dgf = df.withColumn(
+    "value_to",
+    when((col("value_to").isNotNull()) & (col("value_to") != ""), col("value_to"))
+    .otherwise(col("toString"))
+).where((df.IS_ACTIVE == "true"))
+dfianl = dgf.where(df.value_to.isNotNull())
+dfianl.write.mode('overwrite').parquet(output_path)
+AmazonS3_node1732252918634 = glueContext.create_dynamic_frame.from_options(format_options={}, connection_type="s3", format="parquet", connection_options={"paths": ["s3://jira-2024/user_spark_table/snowflake_jira/Staging/issue_field_history.parquet/"], "recurse": True}, transformation_ctx="AmazonS3_node1732252918634")
+
+Snowflake_node1732252970273 = glueContext.write_dynamic_frame.from_options(frame=AmazonS3_node1732252918634, connection_type="snowflake", connection_options={"autopushdown": "on", "postactions": "BEGIN; MERGE INTO AWS_GLUE.ISSUE_HISTORY USING AWS_GLUE.ISSUE_HISTORY_temp_izbo12 ON ISSUE_HISTORY.issue_id = ISSUE_HISTORY_temp_izbo12.issue_id AND ISSUE_HISTORY.fieldid = ISSUE_HISTORY_temp_izbo12.fieldid AND ISSUE_HISTORY.time = ISSUE_HISTORY_temp_izbo12.time AND ISSUE_HISTORY.value_to = ISSUE_HISTORY_temp_izbo12.value_to WHEN MATCHED THEN UPDATE SET issue_id = ISSUE_HISTORY_temp_izbo12.issue_id, fieldid = ISSUE_HISTORY_temp_izbo12.fieldid, value_to = ISSUE_HISTORY_temp_izbo12.value_to, tostring = ISSUE_HISTORY_temp_izbo12.tostring, accountid = ISSUE_HISTORY_temp_izbo12.accountid, is_active = ISSUE_HISTORY_temp_izbo12.is_active, time = ISSUE_HISTORY_temp_izbo12.time, loaddate = ISSUE_HISTORY_temp_izbo12.loaddate WHEN NOT MATCHED THEN INSERT VALUES (ISSUE_HISTORY_temp_izbo12.issue_id, ISSUE_HISTORY_temp_izbo12.fieldid, ISSUE_HISTORY_temp_izbo12.value_to, ISSUE_HISTORY_temp_izbo12.tostring, ISSUE_HISTORY_temp_izbo12.accountid, ISSUE_HISTORY_temp_izbo12.is_active, ISSUE_HISTORY_temp_izbo12.time, ISSUE_HISTORY_temp_izbo12.loaddate); DROP TABLE IF EXISTS AWS_GLUE.ISSUE_HISTORY_temp_izbo12; COMMIT;", "dbtable": "ISSUE_HISTORY_temp_izbo12", "connectionName": "Snowflake_aws", "preactions": "CREATE TABLE IF NOT EXISTS AWS_GLUE.ISSUE_HISTORY (issue_id string, fieldid string, value_to string, tostring string, accountid string, is_active string, time string, loaddate timestamp); DROP TABLE IF EXISTS AWS_GLUE.ISSUE_HISTORY_temp_izbo12; CREATE TABLE IF NOT EXISTS AWS_GLUE.ISSUE_HISTORY_temp_izbo12 (issue_id string, fieldid string, value_to string, tostring string, accountid string, is_active string, time string, loaddate timestamp);", "sfDatabase": "ANALYTICS_TEST", "sfSchema": "AWS_GLUE"}, transformation_ctx="Snowflake_node1732252970273")
+
+dfianl.count()
+job.commit()
